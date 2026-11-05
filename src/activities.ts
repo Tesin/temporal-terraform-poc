@@ -1,9 +1,17 @@
 import { spawn } from 'node:child_process';
-import { log } from '@temporalio/activity';
-import type { PlanResult } from './shared';
+import { Context, heartbeat, log, sleep } from '@temporalio/activity';
+import { APPROVERS, GITHUB_REPO } from './config';
+import { closeIssue, commentOnIssue, createIssue, findApproval, getIssue, listComments } from './github';
+import type { ApprovalIssue, ApprovalResult, PlanResult } from './shared';
 
 // The saved plan lives in the Terraform working directory, so apply can run exactly what plan showed.
 const PLAN_FILE = 'tfplan';
+
+// How often waitForApproval checks the issue for a response.
+const APPROVAL_POLL_INTERVAL_MS = 15_000;
+
+// GitHub rejects issue and comment bodies longer than 65,536 characters.
+const MAX_GITHUB_TEXT = 60_000;
 
 interface CommandResult {
   exitCode: number | null;
@@ -11,15 +19,22 @@ interface CommandResult {
   stderr: string;
 }
 
+/** The Worker's environment, minus credentials that Terraform has no use for. */
+function terraformEnv(): NodeJS.ProcessEnv {
+  // TF_IN_AUTOMATION trims hints that only make sense to a person at a terminal.
+  const env: NodeJS.ProcessEnv = { ...process.env, TF_IN_AUTOMATION: '1' };
+  delete env.GITHUB_TOKEN;
+  for (const name of Object.keys(env)) {
+    if (name.startsWith('TEMPORAL_')) delete env[name];
+  }
+  return env;
+}
+
 /** Runs one terraform command in workingDir, streaming its output to the Worker's console. */
 function terraform(workingDir: string, args: string[]): Promise<CommandResult> {
   log.info(`Running: terraform ${args.join(' ')}`, { workingDir });
   return new Promise((resolve, reject) => {
-    const child = spawn('terraform', args, {
-      cwd: workingDir,
-      // TF_IN_AUTOMATION trims hints that only make sense to a person at a terminal.
-      env: { ...process.env, TF_IN_AUTOMATION: '1' },
-    });
+    const child = spawn('terraform', args, { cwd: workingDir, env: terraformEnv() });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk: Buffer) => {
@@ -37,6 +52,18 @@ function terraform(workingDir: string, args: string[]): Promise<CommandResult> {
 
 function commandFailed(command: string, result: CommandResult): Error {
   return new Error(`terraform ${command} exited with code ${result.exitCode}:\n${result.stderr || result.stdout}`);
+}
+
+function truncate(text: string): string {
+  if (text.length <= MAX_GITHUB_TEXT) return text;
+  return `${text.slice(0, MAX_GITHUB_TEXT)}\n... (truncated; the full output is in the Temporal UI)`;
+}
+
+/** The Workflow run that called the current Activity. These Activities are only ever called by a Workflow. */
+function callingWorkflow(): { workflowId: string; runId: string } {
+  const execution = Context.current().info.workflowExecution;
+  if (!execution) throw new Error('This Activity must be called from a Workflow');
+  return execution;
 }
 
 export async function terraformInit(workingDir: string): Promise<string> {
@@ -65,4 +92,45 @@ export async function terraformApply(workingDir: string, planFile: string): Prom
   const result = await terraform(workingDir, ['apply', '-input=false', '-no-color', planFile]);
   if (result.exitCode !== 0) throw commandFailed('apply', result);
   return result.stdout;
+}
+
+export async function openApprovalIssue(planOutput: string): Promise<ApprovalIssue> {
+  const { workflowId, runId } = callingWorkflow();
+  const summary = planOutput.match(/^Plan: (.*)\.$/m)?.[1] ?? 'changes';
+  const body = [
+    `Temporal Workflow \`${workflowId}\` (run \`${runId}\`) wants to apply this Terraform plan.`,
+    '',
+    `- **To approve:** comment \`Approved\`. Only comments from ${APPROVERS.map((login) => `@${login}`).join(', ')} count.`,
+    '- **To reject:** close this issue.',
+    '',
+    '```text',
+    truncate(planOutput),
+    '```',
+  ].join('\n');
+
+  const issue = await createIssue(GITHUB_REPO, `Approve Terraform plan for ${workflowId}: ${summary}`, body);
+  log.info(`Opened approval issue ${issue.html_url}`);
+  return { number: issue.number, url: issue.html_url };
+}
+
+/** Checks the issue until an approver comments "Approved" or someone closes it. */
+export async function waitForApproval(issueNumber: number): Promise<ApprovalResult> {
+  for (;;) {
+    const approvedBy = findApproval(await listComments(GITHUB_REPO, issueNumber), APPROVERS);
+    if (approvedBy) return { approved: true, approvedBy };
+
+    const issue = await getIssue(GITHUB_REPO, issueNumber);
+    if (issue.state === 'closed') return { approved: false };
+
+    // Heartbeats tell Temporal this Activity is still alive, and carry cancellation back to it.
+    heartbeat();
+    await sleep(APPROVAL_POLL_INTERVAL_MS); // throws if the Workflow is cancelled
+  }
+}
+
+export async function closeApprovalIssue(issueNumber: number, applyOutput: string): Promise<void> {
+  const { runId } = callingWorkflow();
+  const body = [`Applied by run \`${runId}\`:`, '', '```text', truncate(applyOutput), '```'].join('\n');
+  await commentOnIssue(GITHUB_REPO, issueNumber, body);
+  await closeIssue(GITHUB_REPO, issueNumber);
 }

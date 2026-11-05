@@ -2,8 +2,27 @@ lib
 *.tsbuildinfo
 node_modules
 
-# Terraform working files
+# Terraform working files. State and saved plans can contain sensitive values.
 .terraform/
 *.tfstate
 *.tfstate.*
 tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Variable files often hold secrets or account details. This stack's terraform.tfvars holds the AWS account ID.
+*.tfvars
+*.tfvars.json
+
+# Credentials never belong in this repo. The Worker gets them from its environment.
+.env
+.env.*
+.aws/
+*.pem
+*.key

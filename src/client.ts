@@ -1,14 +1,11 @@
 import path from 'node:path';
 import { Client, Connection } from '@temporalio/client';
 import { loadClientConnectConfig } from '@temporalio/envconfig';
+import { GITHUB_REPO } from './config';
 import { TASK_QUEUE } from './shared';
 import { runTerraform } from './workflows';
 
 async function run() {
-  // Usage: npm run workflow -- "some message"
-  // Running again with the same message plans no changes, so apply is skipped.
-  const message = process.argv[2] ?? 'Hello from Terraform, run by Temporal!';
-
   const config = loadClientConnectConfig();
   const connection = await Connection.connect(config.connectionOptions);
   const client = new Client({ connection, namespace: config.namespace });
@@ -17,17 +14,20 @@ async function run() {
     taskQueue: TASK_QUEUE,
     // One Workflow ID per Terraform stack. Temporal allows only one running execution per ID,
     // so two runs can never apply to this stack at the same time.
-    workflowId: 'terraform-hello',
-    args: [{ workingDir: path.resolve(__dirname, '../terraform'), vars: { message } }],
+    workflowId: 'terraform-poc',
+    args: [{ workingDir: path.resolve(__dirname, '../terraform') }],
   });
   console.log(`Started workflow ${handle.workflowId}, run ${handle.firstExecutionRunId}`);
+  console.log(`If the plan has changes, approve the issue it opens in https://github.com/${GITHUB_REPO}/issues`);
 
   const result = await handle.result();
   if (result.applied) {
-    console.log('Applied the plan:\n');
+    console.log(`\nApplied after ${result.approvedBy} approved ${result.approvalIssue}:\n`);
     console.log(result.applyOutput);
+  } else if (result.approvalIssue) {
+    console.log(`\nNot applied: ${result.approvalIssue} was closed without approval.`);
   } else {
-    console.log('No changes, so apply was skipped.');
+    console.log('\nNo changes, so there was nothing to approve.');
   }
 }
 

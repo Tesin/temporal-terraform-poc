@@ -17,8 +17,22 @@ export interface PlanResult {
   output: string;
 }
 
+export interface ApprovalIssue {
+  number: number;
+  url: string;
+}
+
+export interface ApprovalResult {
+  approved: boolean;
+  /** GitHub login of the person who approved. */
+  approvedBy?: string;
+}
+
 export interface TerraformRunResult {
   applied: boolean;
   planOutput: string;
   applyOutput?: string;
+  /** The GitHub issue that asked for approval. Only set if the plan had changes. */
+  approvalIssue?: string;
+  approvedBy?: string;
 }

@@ -4,6 +4,12 @@ import * as activities from './activities';
 import { TASK_QUEUE } from './shared';
 
 async function run() {
+  // The approval Activities need a GitHub token. It comes from the environment, so it never
+  // touches this repository or Temporal.
+  if (!process.env.GITHUB_TOKEN) {
+    throw new Error('Set GITHUB_TOKEN before starting the Worker, for example GITHUB_TOKEN="$(gh auth token)"');
+  }
+
   // Connection settings come from your Temporal config profile (TEMPORAL_PROFILE).
   // With no profile set, this connects to a local dev server at localhost:7233.
   const config = loadClientConnectConfig();
