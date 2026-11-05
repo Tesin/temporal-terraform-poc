@@ -1,0 +1,9 @@
+lib
+*.tsbuildinfo
+node_modules
+
+# Terraform working files
+.terraform/
+*.tfstate
+*.tfstate.*
+tfplan
